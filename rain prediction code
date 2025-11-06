@@ -1,0 +1,175 @@
+import pandas as pd
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import plotly.express as px
+import seaborn as sns
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import MinMaxScaler,OneHotEncoder
+import pyarrow as pa
+from sklearn.linear_model import LogisticRegression 
+from sklearn.pipeline import make_pipeline
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score,mean_absolute_error,accuracy_score
+
+rain_data = pd.read_csv(r"")
+print(rain_data)
+
+#now we will drop the values from rain today and rain tomorrow vecause these two are important pieces of information so will remove the rows where these both are null
+
+rain_data.dropna(subset=['RainToday','RainTomorrow'],inplace=True)
+
+
+year = pd.to_datetime(rain_data['Date']).dt.year ##converting the date column from object to datetime 
+train_df = rain_data[year<2015] #spliting the train data which is before 2015
+validation = rain_data[year==2015] #spliting the validation data which is 2015
+test = rain_data[year>2015] # splitting the data test data which is after 2015
+
+print(train_df.shape)
+
+#identify the input and target columns it is very important step
+
+input_columns = list(train_df.columns)[1:-1]   # [1:-1] it specifies which columns we wantwe don't want the zeroth column as it is a date column so no use and we want "rain tomorrow" as our output so we skip the "rain tomorrow" column 
+target_column = 'RainTomorrow'
+
+print(rain_data[target_column])
+
+train_input = train_df[input_columns].copy()#create a copy in case data is lost or messed up too much
+train_output = train_df[target_column].copy()
+
+validation_input = validation[input_columns].copy()
+validation_output = validation[target_column].copy()
+
+test_input = test[input_columns].copy()
+test_output = test[target_column].copy()
+
+numeric_columns = train_input.select_dtypes(include=np.number).columns.tolist() # used to list the numeric columns
+categorical_columns = train_input.select_dtypes('object').columns.tolist() #used to list the object columns
+
+print(numeric_columns)
+print(categorical_columns)
+
+imputer = SimpleImputer(strategy='mean') #we are now telling the imputer which strategy to use to fill the null values we are now filling the null with mean values 
+
+print(rain_data[numeric_columns].isna().sum()) # checking how many null values are there for each data set in numeric types
+
+imputer.fit(rain_data[numeric_columns]) #calculate mean for every column
+
+print(list(imputer.statistics_)) ## list of all the averages per column
+
+
+# the missing values in the training validation and tes data can be filled in using transform method of imputer
+
+train_input[numeric_columns] = imputer.transform(train_input[numeric_columns])
+validation_input[numeric_columns] = imputer.transform(validation[numeric_columns])
+test_input[numeric_columns] = imputer.transform(test[numeric_columns])
+
+print(train_input[numeric_columns].isna().any()) 
+
+## we are now scaling the data with respect to 0 and 1 becoz the model will be biased to the larger values
+## max will be 1 and min will be 0 so all the values will be scaled according to the max and min
+scaler = MinMaxScaler()
+scaler.fit(rain_data[numeric_columns])
+
+train_input[numeric_columns] = scaler.transform(train_input[numeric_columns])
+validation_input[numeric_columns] = scaler.transform(validation_input[numeric_columns])
+test_input[numeric_columns] = scaler.transform(test_input[numeric_columns])
+
+print(train_input[numeric_columns])
+
+## now one hot encoding techniques for categorical features 
+print(rain_data['Location'].unique())
+encoder = OneHotEncoder(sparse_output=False,handle_unknown='ignore')
+raw_df = rain_data[categorical_columns].fillna('Unknown')
+print(raw_df)
+
+encoder.fit(raw_df)
+print(encoder.categories_)
+
+##now we will generate column names according to the type of data it has # it is not necessary to remember but just knowing it is good
+
+encoded_cols  = list(encoder.get_feature_names_out(categorical_columns))
+print(encoded_cols)
+
+## now we will encode the data into our test train and validation 
+
+train_input[categorical_columns].fillna('Unknown')
+validation_input[categorical_columns].fillna('Unknown')
+test_input[categorical_columns].fillna('Unknown')
+
+train_input[encoded_cols] = encoder.transform(train_input[categorical_columns])
+validation_input[encoded_cols] = encoder.transform(validation_input[categorical_columns])
+test_input[encoded_cols] = encoder.transform(test_input[categorical_columns])
+
+print(train_input[encoded_cols])
+
+## now we are  saving the input and output data to parquet format it is very efficient 
+
+train_input.to_parquet('train_inputs.parquet')
+validation_input.to_parquet('validation_input.parquet')
+test_input.to_parquet('test_input.parquet')
+
+pd.DataFrame(train_output).to_parquet('train_output.parquet')
+pd.DataFrame(validation_output).to_parquet('validation_output.parquet')
+pd.DataFrame(test_output).to_parquet('test_output.parquet')
+
+train_input = pd.read_parquet('train_inputs.parquet')
+validation_input = pd.read_parquet('validation_input.parquet')
+test_input = pd.read_parquet('test_input.parquet')
+
+train_output = pd.read_parquet('train_output.parquet')[target_column]
+validation_output = pd.read_parquet('validation_output.parquet')[target_column]
+test_output = pd.read_parquet('test_output.parquet')[target_column]
+
+## now we are creating logistic regression model #now comes the exciting part be ready while reviewing the code
+model = LogisticRegression(solver='liblinear') #why we took liblinear coz it solves the linear equation very fast compaed t other solvers
+#now we will fit the data into the model 
+
+model.fit(train_input[numeric_columns+encoded_cols],train_output) ## just like model.fit(X,Y) here X is train_input[numeric_columns+encoded_cols] and Y is train_output
+
+print(model.coef_.tolist()) ## checking the weights to each column which is assigned by the logistic regressor
+
+X_train = train_input[numeric_columns+encoded_cols]
+X_validation = validation_input[numeric_columns+encoded_cols]
+X_test = test_input[numeric_columns+encoded_cols]
+
+prediction = model.predict(X_train)
+
+new_data = pd.DataFrame({
+    'Date': ['2021-06-19'],
+             'Location': ['Katherine'],
+             'MinTemp': [23.2],
+             'MaxTemp': [33.2],
+             'Rainfall': [10.2],
+             'Evaporation': [4.2],
+             'Sunshine': [np.nan],
+             'WindGustDir': ['NNW'],
+             'WindGustSpeed': [52.0],
+             'WindDir9am': ['NW'],
+             'WindDir3pm': ['NNE'],
+             'WindSpeed9am': [13.0],
+             'WindSpeed3pm': [0.0],
+             'Humidity9am': [93.0],
+             'Humidity3pm': [60.0],
+             'Pressure9am': [1004.8],
+             'Pressure3pm': [1001.5],   
+             'Cloud9am': [8.0],
+             'Cloud3pm': [5.0],
+             'Temp9am': [25.7],
+             'Temp3pm': [33.0],
+             'RainToday': ['Yes']
+})
+new_data[numeric_columns] = imputer.transform(new_data[numeric_columns])
+new_data[numeric_columns] = scaler.transform(new_data[numeric_columns])
+new_data[encoded_cols] = encoder.transform(new_data[categorical_columns])
+
+new_input = new_data[numeric_columns+encoded_cols]
+
+prediction_new = model.predict(new_input)[0]
+
+print(prediction_new)
+
+prob = model.predict_proba(new_input)[0]
+print(prob)
+
